@@ -9,7 +9,7 @@ import { scrollElementWithinContainer } from "@/lib/dom-scroll";
 import { kvGet, kvSet } from "@/lib/kv-db";
 import { extractCoverPalette, DEFAULT_COVER_PALETTE, type CoverPalette } from "@/lib/cover-color";
 import {
-    getUserPlaylists, addTracksToPlaylist, removeTracksFromPlaylist, getNeteasePlayUrl,
+    getUserPlaylists, addTracksToPlaylist, removeTracksFromPlaylist, getNeteasePlayInfo,
     isNeteaseConfigured, recordTrackPlaylist, removeTrackPlaylistRecord, getTrackPlaylistId,
     getSongCommentPage, getNeteaseSongDetail,
     type NeteasePlaylist,
@@ -372,12 +372,13 @@ export default function MusicPlayer() {
         if (target.id.startsWith("netease_")) {
             beginMusicLoadingToast(target.id);
             const nid = parseInt(target.id.replace("netease_", ""), 10);
-            const url = await getNeteasePlayUrl(nid);
-            if (!url) {
-                showMusicToast("加载失败，请稍后重试");
+            const info = await getNeteasePlayInfo(nid);
+            if (!info.url) {
+                showMusicToast(info.reason || "加载失败，请稍后重试", 2600);
                 return;
             }
-            player.playUrl(url, target);
+            player.playUrl(info.url, target);
+            if (info.trial) showMusicToast("VIP 歌曲，当前播放 30 秒试听", 2600);
             return;
         }
         player.playTrack(target);
@@ -448,7 +449,7 @@ export default function MusicPlayer() {
             <div className="mp-top">
                 <button className="music-player-close" onClick={player.closeFullPlayer}>
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-                        <path d="m6 9 6 6 6-6" />
+                        <path d="M15 19 8 12l7-7" />
                     </svg>
                 </button>
                 <div className="mp-titles">
