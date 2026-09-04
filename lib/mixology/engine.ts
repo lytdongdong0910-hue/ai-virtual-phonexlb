@@ -44,6 +44,7 @@ import {
 } from "./state";
 import { mergeHookState, type MixHook, type MixHookPayload } from "./mechanism-protocol";
 import { disposeMixSandboxes, runMixHook } from "./mechanism-runtime";
+import { disposeMixTrusted, runMixTrustedHook } from "./trusted-runtime";
 
 export const MIX_PROMPT_APP_ID = "mixology";
 const MIX_PROMPT_TAGS = ["mixology"];
@@ -284,6 +285,7 @@ export async function runMixSessionEnd(sessionId: string): Promise<void> {
         }
     }
     disposeMixSandboxes(sessionId);
+    disposeMixTrusted(sessionId);
 }
 
 export type MixReplyResult = {
@@ -334,7 +336,10 @@ async function runMechanismHooks(
             encoreRaws: input.encoreRaws,
             edited: input.edited || undefined,
         };
-        const result = await runMixHook(session.id, material.id, script, hook, payload);
+        // 信任模式的机括不进沙盒：钩子在页面里登记过的函数上跑，数据契约一样
+        const result = material.trusted
+            ? await runMixTrustedHook(session.id, material.id, hook, payload)
+            : await runMixHook(session.id, material.id, script, hook, payload);
         if (typeof result.text === "string") out.text = result.text;
         if (result.note) out.notes.push(result.note);
         if (result.state) out.state = mergeHookState(out.state, result.state);
@@ -750,6 +755,36 @@ export function truncateMixAfterTurn(sessionId: string, turnId: string): MixSess
  * 模型输出掉了格式也能手动修好重渲染；玩家发言仍是纯文本。
  * 编辑的是玩家发言时，调用方应随后用 regenerateMixTail 重新生成回复。
  */
+/**
+ * 对本局历史重跑「进上下文」滤网：把每一轮 AI 正文按当前配方里生效的规则再洗一遍。
+ * 进上下文的滤网只在回复入库那一刻洗，中途新加或改了规则，旧轮次不会回头洗——
+ * 这里补这一手。只动 text（存的和发回模型的都是它），不碰 rawText：原始输出留着，
+ * 之后再编辑看到的仍是模型的原话。规则的生效条件按"那一轮之前的历史"重建现场判。
+ * 返回洗动了几轮，好让界面说清楚发生了什么。
+ */
+export function rerunMixFilters(sessionId: string): { changed: number; total: number; rules: number } {
+    const session = getMixSession(sessionId);
+    if (!session) throw new ChatEngineError("对局不存在。");
+    const entries = resolveMixRecipeMaterials(session.recipe).entries;
+    let changed = 0;
+    let total = 0;
+    let rules = 0;
+    const turns = session.turns.map((turn, idx) => {
+        if (turn.role !== "assistant" || !turn.text) return turn;
+        total += 1;
+        const before = session.turns.slice(0, idx);
+        const active = pickActiveMixMaterials(entries, buildMixConditionContext(withRolledBackState(session, before)));
+        const filterRules = (active.filter ?? []).flatMap((m) => (m.kind === "filter" ? m.rules : []));
+        rules = Math.max(rules, filterRules.filter((r) => r.mode === "context" && r.find).length);
+        const next = applyMixFilterRules(turn.text, filterRules.length ? filterRules : undefined, "context");
+        if (next === turn.text) return turn;
+        changed += 1;
+        return { ...turn, text: next };
+    });
+    if (changed > 0) saveMixSession({ ...session, turns });
+    return { changed, total, rules };
+}
+
 export function editMixTurn(sessionId: string, turnId: string, newText: string): MixSession {
     const current = getMixSession(sessionId);
     if (!current) throw new ChatEngineError("对局不存在。");
